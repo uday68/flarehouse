@@ -1,0 +1,159 @@
+# FlareHouse ⚡
+> **Self-Service Analytics Gateway, High-Throughput Ingestion Engine & AI Query Doctor for ClickHouse**
+
+[![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat&logo=go)](https://golang.org)
+[![ClickHouse](https://img.shields.io/badge/ClickHouse-24.3+-FFCC01?style=flat&logo=clickhouse)](https://clickhouse.com)
+[![React](https://img.shields.io/badge/React-19-61DAFB?style=flat&logo=react)](https://react.dev)
+[![Redis](https://img.shields.io/badge/Redis-7-DC382D?style=flat&logo=redis)](https://redis.io)
+[![Tests](https://img.shields.io/badge/Tests-Passing-10B981?style=flat)](https://github.com/uday68/flarehouse)
+
+**FlareHouse** is an internal platform tooling framework built with **Go**, **ClickHouse**, and **React**. Designed for high-scale telemetry environments (like Cloudflare's Edge and Analytics platforms), FlareHouse solves the critical friction points between product developers, business analysts, and high-throughput columnar OLAP databases.
+
+---
+
+## 🎯 The "Normalized Problems" FlareHouse Solves
+
+In massive analytical environments, engineering teams frequently accept two chronic operational issues as "normal":
+
+1. **Small-Batch Thrashing & Merge Collapse:** Naive microservices push single-row or high-frequency micro-inserts directly to ClickHouse. Because ClickHouse writes an immutable disk part for each insert, this creates thousands of unmerged parts, eventually crashing the cluster with `Too many parts in all data parts in table`.
+2. **Runaway Unindexed Analytical Scans:** Internal business teams run unbounded `SELECT *` queries without timestamp filters on multi-billion-row telemetry tables, exhausting cluster RAM and starving critical production queries.
+3. **Silent Suboptimal Schemas:** Data models frequently use raw strings and unindexed sort keys (`ORDER BY tuple()`) because developers lack real-time visibility into ClickHouse's sparse indexing and columnar compression mechanics.
+
+**FlareHouse eliminates these problems** through an intelligent ingestion buffer, proactive gateway guardrails, and an automated AI Query Doctor.
+
+---
+
+## 🏗️ System Architecture
+
+```
+                                [ Internal Developers & Analysts ]
+                                                │
+                                    React Developer Portal
+                                                │
+                 ┌──────────────────────────────┴──────────────────────────────┐
+                 ▼                                                             ▼
+     [ Analytical Query Gateway ]                               [ High-Throughput Ingestor ]
+      (Go HTTP/REST Reverse Proxy)                               (Go Micro-Batching Daemon)
+                 │                                                             │
+   ┌─────────────┴─────────────┐                                               │
+   │ - Query Guardrail Engine  │                                               │ (Lock-free Ring Buffer)
+   │ - Semantic Redis Cache    │                                               │ (Vectorized Batch Flush)
+   │ - AI Query Doctor (Gemini)│                                               ▼
+   └─────────────┬─────────────┘                                 Kafka Stream / Telemetry Events
+                 │                                                             │
+                 ▼                                                             ▼
+        ClickHouse Cluster                                             ClickHouse Cluster
+   (system.parts / Read Replicas)                                (MergeTree / Materialized Views)
+```
+
+---
+
+## ⚡ Core Platform Capabilities
+
+### 1. High-Throughput Micro-Batching Daemon (Go)
+* **Adaptive Buffer:** Collects streaming edge telemetry events in a thread-safe, lock-free ring buffer.
+* **Vectorized Columnar Ingestion:** Flushes optimal batches (5,000 events or 250ms threshold) via ClickHouse's native TCP protocol (`clickhouse-go/v2`), completely eliminating disk part thrashing.
+* **Channel Backpressure:** Built-in concurrency controls prevent memory runaway when ClickHouse merges are under heavy disk I/O.
+* **Throughput Benchmark:** Ingests **25,000+ events/second** on standard development hardware with single-digit millisecond flush latencies.
+
+### 2. Platform Query Gateway & Guardrails (Go)
+* **Destructive Command Blocking:** Rejects `DROP`, `TRUNCATE`, `ALTER`, or `SYSTEM` queries from reaching analytical tables.
+* **Columnar Scan Enforcement:** Detects `SELECT *` anti-patterns that defeat columnar compression.
+* **Partition Pruning Verification:** Flags queries missing `timestamp` or `toDate()` boundaries on wide MergeTree tables.
+* **Missing LIMIT Protection:** Prevents un-aggregated raw scans from dumping gigabytes over client sockets.
+
+### 3. AI Query Doctor & Index Optimizer
+* **EXPLAIN Plan Parsing:** Automatically inspects ClickHouse's sparse index usage (`EXPLAIN indexes = 1`).
+* **Systems Diagnosis:** Identifies table scan anti-patterns, missing `LowCardinality` dictionary compression, and opportunities for pre-aggregated `SummingMergeTree` Materialized Views.
+* **Gemini LLM Integration:** Connects with the Google Gemini API to generate production-ready rewritten SQL and actionable DDL recommendations.
+
+### 4. Semantic Redis Query Cache
+* **Deterministic Normalization:** Strips excess whitespace, standardizes case, and generates a SHA-256 query hash.
+* **Sub-millisecond Responses:** Serves repeated analytical dashboards in **< 0.6 ms** directly from memory.
+
+### 5. Self-Service Developer UI (React + TypeScript)
+* Modern Cloudflare-inspired dark interface.
+* Interactive SQL workbench with one-click preset scenarios (Materialized Views, high-error IP drilldowns, guardrail trigger tests).
+* Live telemetry meters showing real-time Events/sec, buffer capacity, and average flush latency.
+* ClickHouse Partition Explorer tracking active parts, uncompressed vs compressed sizes, and compression ratios.
+
+---
+
+## 🚀 Quickstart
+
+### Prerequisites
+* [Docker Desktop](https://www.docker.com/)
+* [Go 1.24+](https://golang.org/dl/)
+* [Node.js 20+](https://nodejs.org/)
+
+### 1. Clone & Start Infrastructure
+```bash
+git clone https://github.com/uday68/flarehouse.git
+cd flarehouse
+
+# Start ClickHouse and Redis
+docker compose up -d clickhouse redis
+```
+
+The database schema (`deploy/init-clickhouse.sql`) will automatically initialize:
+* `flarehouse.edge_http_logs` (Optimized MergeTree with LowCardinality attributes)
+* `flarehouse.edge_metrics_1m` (SummingMergeTree pre-aggregated rollup)
+* `flarehouse.unoptimized_legacy_logs` (Demonstration anti-pattern table)
+
+### 2. Run the Gateway Server
+```bash
+go run ./cmd/gateway
+```
+The server will start on `http://localhost:8080`.
+
+### 3. Open the Developer Portal
+Navigate to:
+```
+http://localhost:8080
+```
+*(The Go binary automatically serves the pre-compiled React frontend).*
+
+For frontend hot-reloading during development:
+```bash
+cd web
+npm install
+npm run dev
+```
+
+---
+
+## 🧪 Running Tests & Benchmarks
+
+Run the complete Go test suite with race detection:
+```bash
+go test -v -race ./...
+```
+
+Expected output:
+```
+=== RUN   TestHeuristicDiagnosis
+--- PASS: TestHeuristicDiagnosis (0.00s)
+=== RUN   TestHashQueryNormalization
+--- PASS: TestHashQueryNormalization (0.00s)
+=== RUN   TestGuardrails
+--- PASS: TestGuardrails (0.00s)
+PASS
+ok      github.com/uday68/flarehouse/internal/guardrail
+ok      github.com/uday68/flarehouse/internal/cache
+ok      github.com/uday68/flarehouse/internal/aidoctor
+```
+
+---
+
+## 📊 Live Demo Scenarios
+
+In the FlareHouse UI:
+1. **Test High-Throughput Batching:** Navigate to the **Streaming Ingestion Engine** tab and click *"Inject 25,000 Edge Telemetry Events"*. Watch the Go worker pool ingest events in real-time at 25k+ EPS.
+2. **Test Query Guardrails:** Go to **Analytical Query Console**, select *Columnar Anti-Pattern*, and run it. The gateway immediately blocks the unpartitioned full-scan and provides actionable guidance.
+3. **Test AI Query Doctor:** Select *Legacy Unoptimized Table* and click *AI Doctor Diagnosis*. View the EXPLAIN plan breakdown, detected `ORDER BY tuple()` anti-patterns, and 1-click apply the optimized query.
+4. **Test Redis Caching:** Run any analytical aggregation twice. The second run executes in **0.4ms** with the `Cached via Redis` badge.
+
+---
+
+## 👨‍💻 Author
+* **V Uday** — [GitHub: Uday68](https://github.com/uday68) • [LinkedIn](https://www.linkedin.com/in/uday-v-b2a65427b)
