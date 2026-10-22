@@ -4,7 +4,9 @@
 [![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat&logo=go)](https://golang.org)
 [![ClickHouse](https://img.shields.io/badge/ClickHouse-24.3+-FFCC01?style=flat&logo=clickhouse)](https://clickhouse.com)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat&logo=react)](https://react.dev)
-[![Redis](https://img.shields.io/badge/Redis-7-DC382D?style=flat&logo=redis)](https://redis.io)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-K8s-326CE5?style=flat&logo=kubernetes)](https://kubernetes.io)
+[![GitLab CI](https://img.shields.io/badge/GitLab_CI-Pipeline-FC6D26?style=flat&logo=gitlab)](https://about.gitlab.com)
+[![Prometheus](https://img.shields.io/badge/Prometheus-Metrics-E6522C?style=flat&logo=prometheus)](https://prometheus.io)
 [![Tests](https://img.shields.io/badge/Tests-Passing-10B981?style=flat)](https://github.com/uday68/flarehouse)
 
 **FlareHouse** is an internal platform tooling framework built with **Go**, **ClickHouse**, and **React**. Designed for high-scale telemetry environments (like Cloudflare's Edge and Analytics platforms), FlareHouse solves the critical friction points between product developers, business analysts, and high-throughput columnar OLAP databases.
@@ -152,6 +154,53 @@ In the FlareHouse UI:
 2. **Test Query Guardrails:** Go to **Analytical Query Console**, select *Columnar Anti-Pattern*, and run it. The gateway immediately blocks the unpartitioned full-scan and provides actionable guidance.
 3. **Test AI Query Doctor:** Select *Legacy Unoptimized Table* and click *AI Doctor Diagnosis*. View the EXPLAIN plan breakdown, detected `ORDER BY tuple()` anti-patterns, and 1-click apply the optimized query.
 4. **Test Redis Caching:** Run any analytical aggregation twice. The second run executes in **0.4ms** with the `Cached via Redis` badge.
+
+---
+
+## ☸️ Kubernetes (K8s) Production Architecture
+
+FlareHouse includes production Kubernetes manifests located in [`deploy/k8s/`](./deploy/k8s/):
+* **StatefulSet for ClickHouse:** Includes PersistentVolumeClaim templates (`fast-nvme`) and headless services for discovery.
+* **RollingUpdate Deployment for Gateway:** Configured with 3 replicas, non-root runtime security contexts (`UID 10001`), resource requests/limits, and HTTP `/health` liveness and readiness probes.
+* **HorizontalPodAutoscaler (HPA):** Dynamically scales Gateway pods between 2 and 10 based on CPU (70%) and memory thresholds.
+* **Prometheus Annotations:** Automatically discovered by Kubernetes Prometheus operators via `prometheus.io/scrape: "true"`.
+
+```bash
+# Deploy to Kubernetes cluster using Kustomize
+kubectl apply -k deploy/k8s/
+```
+
+---
+
+## 🦊 GitLab CI/CD Pipeline
+
+FlareHouse features an enterprise-grade [`.gitlab-ci.yml`](./.gitlab-ci.yml) pipeline matching Cloudflare's internal engineering workflows:
+1. **Lint Stage:** Runs `golangci-lint`, `go vet`, and frontend TypeScript validation.
+2. **Test Stage:** Executes `go test -v -race -coverprofile=coverage.out ./...` with Cobertura coverage reports.
+3. **Build Stage:** Compiles cross-platform static Linux binaries (`linux-amd64` and `linux-arm64`).
+4. **Package Stage:** Hardened multi-stage Docker container build on branch merge.
+
+---
+
+## 📈 Prometheus Telemetry & Observability
+
+Standard Prometheus metrics are exported natively at `/metrics`:
+* `flarehouse_ingest_events_received_total`: Total streaming events accepted.
+* `flarehouse_ingest_events_flushed_total`: Total events successfully committed to ClickHouse.
+* `flarehouse_ingest_batches_written_total`: Total columnar batch insertions.
+* `flarehouse_ingest_batch_flush_duration_seconds`: Histogram of ClickHouse insert latencies.
+* `flarehouse_ingest_buffer_queue_depth`: Live gauge of ring-buffer queue saturation.
+* `flarehouse_gateway_query_execution_duration_seconds`: Analytical query duration partitioned by cache hit status.
+* `flarehouse_gateway_guardrail_blocked_queries_total`: Count of queries blocked by safety rules.
+
+---
+
+## ☁️ Centralized Cloud Data Lake & Storage Tiering
+
+FlareHouse supports hybrid storage tiering ([`deploy/gcp-storage-policy.xml`](./deploy/gcp-storage-policy.xml)):
+* **Hot Tier:** High-speed NVMe local storage for sub-second analytical queries on active 14-day telemetry.
+* **Cold Lake Tier:** Automated background partition migration to **Google Cloud Storage (GCS)** or **Cloudflare R2** via ClickHouse storage policies.
+* **Data Lake Export:** Exporting hourly analytical rollups to Apache Parquet format for BigQuery, Spark, and cross-functional business intelligence federation.
 
 ---
 

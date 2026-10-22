@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/uday68/flarehouse/internal/clickhouse"
 	"github.com/uday68/flarehouse/internal/model"
+	"github.com/uday68/flarehouse/internal/telemetry"
 )
 
 type BatcherConfig struct {
@@ -73,6 +74,7 @@ func NewIngestionEngine(cfg BatcherConfig, chClient *clickhouse.Client) *Ingesti
 
 // Start spawns background ingestion workers
 func (e *IngestionEngine) Start() {
+	telemetry.ActiveWorkersGauge.Set(float64(e.cfg.Workers))
 	for i := 0; i < e.cfg.Workers; i++ {
 		e.wg.Add(1)
 		go e.workerLoop(i)
@@ -89,6 +91,7 @@ func (e *IngestionEngine) Start() {
 			case <-ticker.C:
 				diff := e.lastSecFlushes.Swap(0)
 				e.currentEPS.Store(diff)
+				telemetry.BufferDepthGauge.Set(float64(len(e.eventChan)))
 			}
 		}
 	}()
@@ -97,8 +100,10 @@ func (e *IngestionEngine) Start() {
 // Ingest adds an event to the buffer; returns false if channel is full (backpressure)
 func (e *IngestionEngine) Ingest(event model.TelemetryEvent) bool {
 	e.totalReceived.Add(1)
+	telemetry.EventsIngestedTotal.Inc()
 	select {
 	case e.eventChan <- event:
+		telemetry.BufferDepthGauge.Set(float64(len(e.eventChan)))
 		return true
 	default:
 		e.droppedEvents.Add(1)
@@ -131,6 +136,12 @@ func (e *IngestionEngine) workerLoop(workerID int) {
 			e.batchesCount.Add(1)
 			e.totalFlushMs.Add(uint64(duration))
 			e.lastSecFlushes.Add(uint64(len(batchCopy)))
+
+			// Prometheus Observability metrics
+			telemetry.EventsFlushedTotal.Add(float64(len(batchCopy)))
+			telemetry.BatchesWrittenTotal.Inc()
+			telemetry.BatchFlushLatency.Observe(time.Since(flushStart).Seconds())
+			telemetry.BufferDepthGauge.Set(float64(len(e.eventChan)))
 		}
 	}
 

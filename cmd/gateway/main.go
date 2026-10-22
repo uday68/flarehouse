@@ -15,12 +15,14 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/uday68/flarehouse/internal/aidoctor"
 	"github.com/uday68/flarehouse/internal/cache"
 	"github.com/uday68/flarehouse/internal/clickhouse"
 	"github.com/uday68/flarehouse/internal/guardrail"
 	"github.com/uday68/flarehouse/internal/ingest"
 	"github.com/uday68/flarehouse/internal/model"
+	"github.com/uday68/flarehouse/internal/telemetry"
 )
 
 type Server struct {
@@ -86,6 +88,7 @@ func main() {
 	}))
 
 	r.Get("/health", srv.handleHealth)
+	r.Handle("/metrics", promhttp.Handler())
 	r.Post("/api/query", srv.handleQuery)
 	r.Post("/api/explain", srv.handleExplain)
 	r.Get("/api/stats", srv.handleStats)
@@ -174,6 +177,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// 1. Guardrail evaluation
 	decision := s.guardrails.Evaluate(req.SQL)
 	if !decision.Safe {
+		telemetry.GuardrailBlockedTotal.Inc()
 		writeJSON(w, http.StatusOK, model.QueryResponse{
 			QueryBlocked:   true,
 			GuardrailError: fmt.Sprintf("Guardrail Violation: %s", decision.ViolationReasons[0]),
@@ -186,6 +190,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// 2. Cache lookup
 	if !req.BypassCache {
 		if cachedResp, err := s.queryCache.Get(r.Context(), cacheKey); err == nil && cachedResp != nil {
+			telemetry.QueryDuration.WithLabelValues("true", "200").Observe(cachedResp.DurationMs / 1000.0)
 			writeJSON(w, http.StatusOK, cachedResp)
 			return
 		}
@@ -194,12 +199,15 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// 3. Execution against ClickHouse
 	resp, err := s.chClient.ExecuteQuery(r.Context(), req.SQL)
 	if err != nil {
+		telemetry.QueryDuration.WithLabelValues("false", "500").Observe(0)
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
 			"error":   err.Error(),
 			"message": "ClickHouse execution failed",
 		})
 		return
 	}
+
+	telemetry.QueryDuration.WithLabelValues("false", "200").Observe(resp.DurationMs / 1000.0)
 
 	// 4. Save to Redis cache for 60 seconds
 	_ = s.queryCache.Set(r.Context(), cacheKey, resp, 60*time.Second)

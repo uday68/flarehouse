@@ -1,0 +1,34 @@
+<clickhouse>
+    <storage_configuration>
+        <disks>
+            <!-- Hot Tier: High-speed local NVMe storage for real-time ingestion and low-latency queries -->
+            <default>
+                <path>/var/lib/clickhouse/</path>
+            </default>
+            <!-- Cold Tier: Google Cloud Storage (GCS) / Cloudflare R2 Data Lake for historical data retention -->
+            <gcs_cold_lake>
+                <type>s3</type>
+                <endpoint>https://storage.googleapis.com/cloudflare-centralized-data-lake/clickhouse-cold/</endpoint>
+                <access_key_id>${GCP_HMAC_ACCESS_KEY}</access_key_id>
+                <secret_access_key>${GCP_HMAC_SECRET_KEY}</secret_access_key>
+                <metadata_path>/var/lib/clickhouse/disks/gcs_cold_lake/</metadata_path>
+                <cache_enabled>true</cache_enabled>
+                <cache_size>10737418240</cache_size> <!-- 10GB read cache on local disk -->
+            </gcs_cold_lake>
+        </disks>
+
+        <policies>
+            <tiered_data_lake_policy>
+                <volumes>
+                    <hot_volume>
+                        <disk>default</disk>
+                    </hot_volume>
+                    <cold_lake_volume>
+                        <disk>gcs_cold_lake</disk>
+                    </cold_lake_volume>
+                </volumes>
+                <move_factor>0.10</move_factor> <!-- Move to cold lake when hot disk exceeds 90% capacity -->
+            </tiered_data_lake_policy>
+        </policies>
+    </storage_configuration>
+</clickhouse>

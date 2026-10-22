@@ -1,0 +1,81 @@
+stages:
+  - lint
+  - test
+  - build
+  - package
+
+variables:
+  GO_VERSION: "1.24"
+  NODE_VERSION: "20"
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+
+# ---------------------------------------------------------------------------
+# 1. Static Analysis & Linting
+# ---------------------------------------------------------------------------
+lint:go:
+  stage: lint
+  image: golang:${GO_VERSION}-alpine
+  before_script:
+    - apk add --no-cache git gcc musl-dev
+  script:
+    - go vet ./...
+    - go fmt ./...
+
+lint:frontend:
+  stage: lint
+  image: node:${NODE_VERSION}-alpine
+  before_script:
+    - cd web && npm ci
+  script:
+    - npm run build
+
+# ---------------------------------------------------------------------------
+# 2. Automated Testing with Race Detection & Coverage
+# ---------------------------------------------------------------------------
+test:go-race:
+  stage: test
+  image: golang:${GO_VERSION}-alpine
+  before_script:
+    - apk add --no-cache gcc musl-dev git
+  script:
+    - go test -v -race -covermode=atomic -coverprofile=coverage.out ./...
+  coverage: '/coverage: \d+.\d+% of statements/'
+  artifacts:
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: coverage.out
+    paths:
+      - coverage.out
+    expire_in: 7 days
+
+# ---------------------------------------------------------------------------
+# 3. Binary Compilation (Multi-Arch: AMD64 & ARM64)
+# ---------------------------------------------------------------------------
+build:binaries:
+  stage: build
+  image: golang:${GO_VERSION}-alpine
+  before_script:
+    - apk add --no-cache git
+  script:
+    - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o bin/flarehouse-gateway-linux-amd64 ./cmd/gateway
+    - CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-w -s" -o bin/flarehouse-gateway-linux-arm64 ./cmd/gateway
+  artifacts:
+    paths:
+      - bin/
+    expire_in: 14 days
+
+# ---------------------------------------------------------------------------
+# 4. Container Packaging (Docker In Docker / Kaniko)
+# ---------------------------------------------------------------------------
+package:docker:
+  stage: package
+  image: docker:27-cli
+  services:
+    - docker:27-dind
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  script:
+    - docker build -t flarehouse-gateway:${CI_COMMIT_SHORT_SHA} -t flarehouse-gateway:latest .
+    - echo "Docker build successful for commit ${CI_COMMIT_SHORT_SHA}"
