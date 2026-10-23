@@ -10,7 +10,7 @@
 [![Prometheus](https://img.shields.io/badge/Prometheus-Metrics-E6522C?style=flat&logo=prometheus)](https://prometheus.io)
 [![CI](https://github.com/uday68/flarehouse/actions/workflows/ci.yml/badge.svg)](https://github.com/uday68/flarehouse/actions/workflows/ci.yml)
 
-**FlareHouse** is an open-source data platform tooling framework built with **Go**, **ClickHouse**, and **React 19**. Engineered for high-scale telemetry environments, edge networks, and real-time distributed platforms, FlareHouse resolves common operational friction points between software engineers, analytical teams, and high-throughput columnar OLAP databases.
+**FlareHouse** is an open-source data platform tooling framework built with **Go**, **ClickHouse**, and **React 19**. Engineered for high-scale telemetry environments, edge computing workloads, and real-time distributed systems, FlareHouse resolves common operational friction points between software engineers, analytical teams, and high-throughput columnar OLAP databases.
 
 ---
 
@@ -92,6 +92,41 @@ flowchart TD
 
 ---
 
+## 📁 Repository Structure
+
+```
+flarehouse/
+├── .github/workflows/          # GitHub Actions CI workflow (Go test -race, Vitest, lint)
+├── .gitlab-ci.yml              # GitLab CI multi-stage pipeline configuration
+├── Dockerfile                  # Hardened multi-stage container build (non-root UID 10001)
+├── docker-compose.yml          # Local ClickHouse, Redis, and streaming containers
+├── cmd/
+│   └── gateway/main.go         # API Gateway, Prometheus exporter & Web UI server
+├── internal/
+│   ├── aidoctor/               # EXPLAIN plan parser & LLM/heuristic optimizer
+│   ├── cache/                  # Redis semantic query hashing & caching layer
+│   ├── clickhouse/             # High-performance native TCP client pool (port 9000)
+│   ├── guardrail/              # AST query validator & partition scan safety rules
+│   ├── ingest/                 # Lock-free ring buffer & adaptive micro-batching daemon
+│   ├── model/                  # Shared domain types & telemetry schemas
+│   └── telemetry/              # Prometheus metrics instrumentation
+├── deploy/
+│   ├── init-clickhouse.sql     # Database schema, LowCardinality & Materialized Views
+│   ├── gcp-storage-policy.xml  # ClickHouse tiered cold lake configuration
+│   ├── data-lake-tiering.sql   # Storage policy & Parquet export DDL
+│   └── k8s/                    # Kubernetes manifests (Deployment, Service, HPA, StatefulSet)
+├── batch/                      # PySpark offline partition rollup job
+│   ├── rollup_job.py           # Hourly rollup aggregation script
+│   ├── generate_sample_parquet.py # Synthetic data generator for local verification
+│   └── README.md               # Local execution guide and scope notes
+└── web/                        # React 19 + Redux Toolkit (RTK Query) Developer Portal
+    ├── src/components/         # Modular UI (QueryEditor, GuardrailPanel, AIDoctorPanel, etc.)
+    ├── src/store/              # Redux store & RTK Query gateway API hooks
+    └── src/test/               # Vitest & React Testing Library test suites
+```
+
+---
+
 ## ⚡ Core Capabilities
 
 ### 1. High-Throughput Micro-Batching Daemon (Go)
@@ -162,12 +197,26 @@ http://localhost:8080
 ```
 *(The Go gateway automatically serves the pre-compiled React frontend).*
 
-For frontend hot-reloading:
+For frontend hot-reloading during development:
 ```bash
 cd web
 npm install
 npm run dev
 ```
+
+---
+
+## 📊 Live Demo Scenarios in Developer Portal
+
+| Scenario / Preset | Action | Expected Platform Behavior |
+| :--- | :--- | :--- |
+| **1-Hour Aggregation** | Select preset & click *Run Query* | Scans pre-aggregated `SummingMergeTree` Materialized View. Instant sub-10ms response. |
+| **Status 500 Spike** | Select preset & click *Run Query* | Executes partition-pruned scan on primary key `(tenant_id, toDate(timestamp), status_code)`. |
+| **Columnar Anti-Pattern** | Select preset & click *Run Query* | **Blocked by Guardrails**: Gateway flags unbounded partition scan and missing `LIMIT`. Alert banner rendered. |
+| **Guardrail $\rightarrow$ AI Doctor** | Click *Ask AI Doctor to rewrite this safely* | Automatically routes to the AI Doctor tab, runs `EXPLAIN`, and suggests a partition-bounded query. |
+| **Legacy Unoptimized Table** | Select preset & click *AI Doctor Diagnosis* | Flags `ORDER BY tuple()` anti-pattern and daily partition fragmentation; suggests `MergeTree` schema fix. |
+| **Redis Cache Hit** | Run any analytical aggregation twice | Second query returns in **0.4 ms** with the `⚡ Cached via Redis` badge. |
+| **High-Throughput Batching** | Open *Streaming Engine* $\rightarrow$ Inject 25,000 events | Go daemon ingests 25k events via adaptive ring-buffer; flushes 5,000-row columnar batches. |
 
 ---
 
@@ -191,6 +240,38 @@ pip install -r requirements.txt
 python generate_sample_parquet.py
 python rollup_job.py --input ./data/raw_partitions --output ./data/hourly_rollups
 ```
+
+---
+
+## ⚙️ Environment Configuration
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `PORT` | HTTP port for the FlareHouse Gateway | `8080` |
+| `CLICKHOUSE_ADDR` | ClickHouse native TCP connection address | `localhost:9000` |
+| `CLICKHOUSE_DB` | Target ClickHouse database name | `flarehouse` |
+| `CLICKHOUSE_USER` | ClickHouse database username | `default` |
+| `CLICKHOUSE_PASSWORD` | ClickHouse database password | `clickhouse123` |
+| `REDIS_ADDR` | Redis connection host and port | `localhost:6379` |
+| `GEMINI_API_KEY` | *(Optional)* Google Gemini API key for AI Query Doctor | `""` *(falls back to local heuristics)* |
+| `STATIC_DIR` | Path to pre-compiled frontend assets | `./web/dist` |
+| `VITE_API_BASE` | Web portal gateway API base URL | `http://localhost:8080` |
+
+---
+
+## 📡 HTTP & Telemetry API Reference
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/health` | Healthcheck verifying ClickHouse TCP ping and Redis connectivity |
+| `GET` | `/metrics` | Native Prometheus exporter endpoint |
+| `POST` | `/api/query` | Executes analytical SQL query through guardrail verification & Redis cache |
+| `POST` | `/api/explain` | Runs ClickHouse `EXPLAIN` and returns AI Doctor optimization analysis |
+| `GET` | `/api/stats` | Returns real-time ingestion throughput, queue depth, and flush latencies |
+| `GET` | `/api/partitions` | Queries `system.parts` for partition row counts and compression ratios |
+| `POST` | `/api/load/start?count=N` | Starts background synthetic telemetry generator |
+| `POST` | `/api/load/stop` | Stops background load generator |
+| `POST` | `/api/ingest` | Direct JSON event ingestion endpoint for external microservices |
 
 ---
 
