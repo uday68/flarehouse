@@ -11,6 +11,12 @@ vendor/
 web/node_modules/
 .pnp
 .pnp.js
+batch/.venv/
+batch/data/
+__pycache__/
+*.pyc
+metastore_db/
+derby.log
 
 # Testing & logs
 *.out
