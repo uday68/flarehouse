@@ -1,0 +1,103 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: platformcells.kubeplat.atlassian.io
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.14.0
+    description: "Declarative cell-based architecture custom resource for Atlassian KubePlatform compute domains"
+spec:
+  group: kubeplat.atlassian.io
+  names:
+    kind: PlatformCell
+    listKind: PlatformCellList
+    plural: platformcells
+    singular: platformcell
+    shortNames:
+      - pcell
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - cellId
+                - cloudProvider
+                - region
+                - blastRadiusLimitPercent
+              properties:
+                cellId:
+                  type: string
+                  description: "Unique cell identifier (e.g. cell-ap-south-1a-01)"
+                cloudProvider:
+                  type: string
+                  enum: ["aws", "gcp", "fedramp-aws", "oasis-gcp"]
+                  description: "Target multi-cloud provider or compliance boundary"
+                region:
+                  type: string
+                  description: "Physical cloud region hosting the cellular fault domain"
+                blastRadiusLimitPercent:
+                  type: integer
+                  minimum: 1
+                  maximum: 25
+                  description: "Maximum global traffic capacity allocated per cell to guarantee isolation"
+                controlPlane:
+                  type: object
+                  properties:
+                    apiServerReplicas:
+                      type: integer
+                      default: 3
+                    etcdClusterSize:
+                      type: integer
+                      default: 5
+                    reconcilerSyncIntervalSeconds:
+                      type: integer
+                      default: 30
+                computePools:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      poolName:
+                        type: string
+                      instanceType:
+                        type: string
+                      minNodes:
+                        type: integer
+                      maxNodes:
+                        type: integer
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: ["Provisioning", "Active", "Draining", "Isolated", "Degraded"]
+                activeWorkloads:
+                  type: integer
+                healthyNodes:
+                  type: integer
+                lastReconciledAt:
+                  type: string
+                  format: date-time
+                trafficEgressStatus:
+                  type: string
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Cloud
+          type: string
+          jsonPath: .spec.cloudProvider
+        - name: Region
+          type: string
+          jsonPath: .spec.region
+        - name: Status
+          type: string
+          jsonPath: .status.phase
+        - name: BlastRadius
+          type: string
+          jsonPath: .spec.blastRadiusLimitPercent

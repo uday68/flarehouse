@@ -4,6 +4,8 @@ kind: Kustomization
 namespace: analytics-platform
 
 resources:
+  - crd-flarehouse-cell.yaml
+  - cell-topology.yaml
   - gateway-deployment.yaml
   - gateway-service.yaml
   - gateway-hpa.yaml

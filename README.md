@@ -275,15 +275,18 @@ python rollup_job.py --input ./data/raw_partitions --output ./data/hourly_rollup
 
 ---
 
-## ☸️ Kubernetes Deployment
+## ☸️ Kubernetes Control Plane & Cell-Based Architecture
 
-Production manifests with Kustomize are provided in [`deploy/k8s/`](./deploy/k8s/):
-* **ClickHouse StatefulSet:** Includes PersistentVolumeClaim templates and headless discovery service.
-* **Gateway Deployment:** 3 replicas with non-root security context (`UID 10001`), resource limits, and HTTP `/health` probes.
-* **HorizontalPodAutoscaler (HPA):** Scales Gateway pods dynamically between 2 and 10 based on CPU/Memory utilization.
-* **Prometheus Scraping:** Annotated with `prometheus.io/scrape: "true"`.
+FlareHouse includes enterprise-grade, cell-based infrastructure manifests with Kustomize in [`deploy/k8s/`](./deploy/k8s/), designed for high-scale Kubernetes control plane platforms and multi-cloud resilience (AWS EKS & GCP GKE):
+* **Custom Resource Definition (`PlatformCell`):** [`deploy/k8s/crd-flarehouse-cell.yaml`](./deploy/k8s/crd-flarehouse-cell.yaml) defines declarative cellular compute domains (`kubeplat.atlassian.io/v1alpha1`), enforcing blast-radius capacity limits ($\le 10\%$) and autonomous control plane specs.
+* **Cellular Fault Isolation (`cell-topology.yaml`):** [`deploy/k8s/cell-topology.yaml`](./deploy/k8s/cell-topology.yaml) instantiates multi-cloud autonomous cells across AWS and GCP, paired with strict Kubernetes NetworkPolicies to eliminate blast-radius propagation during localized infrastructure degradation.
+* **ClickHouse StatefulSet:** Includes PersistentVolumeClaim templates and headless discovery service with fast-NVMe storage classes.
+* **Gateway Deployment:** 3 replicas with unprivileged non-root security context (`UID 10001`), resource requests/limits, zero-privilege escalation, and self-healing HTTP `/health` liveness/readiness probes.
+* **HorizontalPodAutoscaler (HPA):** Dynamic autoscaling between 2 and 10 pods driven by resource utilization heuristics.
+* **Native Prometheus Observability:** Annotated pods enabling scraping at `/metrics` with zero-overhead telemetry export.
 
 ```bash
+# Validate and deploy cellular topology via Kustomize
 kubectl apply -k deploy/k8s/
 ```
 

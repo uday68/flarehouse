@@ -1,0 +1,108 @@
+# ==============================================================================
+# Atlassian KubePlatform (KubePlat) Cell-Based Architecture Manifest
+# Declarative multi-cloud cellular topology across AWS (EKS) and GCP (GKE)
+# Demonstrating blast-radius isolation, autonomous control planes & self-healing
+# ==============================================================================
+
+apiVersion: kubeplat.atlassian.io/v1alpha1
+kind: PlatformCell
+metadata:
+  name: cell-ap-south-aws-01
+  namespace: analytics-platform
+  labels:
+    kubeplat.atlassian.io/tier: tier-0-critical
+    kubeplat.atlassian.io/cell-type: compute-ingestion
+spec:
+  cellId: "cell-ap-south-aws-01"
+  cloudProvider: "aws"
+  region: "ap-south-1"
+  blastRadiusLimitPercent: 10
+  controlPlane:
+    apiServerReplicas: 3
+    etcdClusterSize: 5
+    reconcilerSyncIntervalSeconds: 15
+  computePools:
+    - poolName: "stateless-gateway-pool"
+      instanceType: "c6i.2xlarge"
+      minNodes: 3
+      maxNodes: 20
+    - poolName: "stateful-olap-pool"
+      instanceType: "i3en.3xlarge"
+      minNodes: 3
+      maxNodes: 9
+
+---
+apiVersion: kubeplat.atlassian.io/v1alpha1
+kind: PlatformCell
+metadata:
+  name: cell-ap-south-gcp-02
+  namespace: analytics-platform
+  labels:
+    kubeplat.atlassian.io/tier: tier-0-critical
+    kubeplat.atlassian.io/cell-type: compute-ingestion
+spec:
+  cellId: "cell-ap-south-gcp-02"
+  cloudProvider: "gcp"
+  region: "asia-south1"
+  blastRadiusLimitPercent: 10
+  controlPlane:
+    apiServerReplicas: 3
+    etcdClusterSize: 5
+    reconcilerSyncIntervalSeconds: 15
+  computePools:
+    - poolName: "stateless-gateway-pool"
+      instanceType: "c2-standard-8"
+      minNodes: 3
+      maxNodes: 20
+    - poolName: "stateful-olap-pool"
+      instanceType: "n2-highmem-16"
+      minNodes: 3
+      maxNodes: 9
+
+---
+# Cell-Level Router and Traffic Canary Isolation
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cell-isolation-network-policy
+  namespace: analytics-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: flarehouse
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Restrict ingress to legitimate ingress controllers and intra-cell communications
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: flarehouse-gateway
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 9000
+  egress:
+    # Allow egress to intra-cell ClickHouse storage & authorized Cloud Data Lake (AWS S3 / GCP GCS)
+    - to:
+        - podSelector:
+            matchLabels:
+              app: clickhouse
+      ports:
+        - protocol: TCP
+          port: 9000
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
