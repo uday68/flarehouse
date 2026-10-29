@@ -20,9 +20,10 @@ In massive analytical environments, engineering teams frequently encounter chron
 
 1. **Small-Batch Thrashing & Merge Collapse:** Naive microservices often write single-row or frequent micro-inserts directly into ClickHouse. Because columnar engines commit immutable disk parts per insert, this creates thousands of unmerged parts, eventually exhausting file handles and triggering `Too many parts in all data parts in table` errors.
 2. **Runaway Unindexed Analytical Scans:** Internal teams often run unpartitioned `SELECT *` queries without time bounds on multi-billion-row telemetry tables, exhausting cluster RAM and starving critical production pipelines.
-3. **Suboptimal Schema Anti-Patterns:** Analytical datasets frequently use uncompressed strings and unindexed sort keys (`ORDER BY tuple()`) because developers lack immediate feedback on sparse indexing performance and disk compression mechanics.
+3. **Transient Storage Failures & Silent Ingestion Loss:** High-throughput streaming ingestors frequently discard events if downstream database calls fail. FlareHouse addresses this with bounded exponential backoff with jitter, dead-letter spooling (`DeadLetterSpool`), and clean graceful flush during shutdown.
+4. **Suboptimal Schema Anti-Patterns:** Analytical datasets frequently use uncompressed strings and unindexed sort keys (`ORDER BY tuple()`) because developers lack immediate feedback on sparse indexing performance and disk compression mechanics.
 
-**FlareHouse mitigates these issues** via an adaptive lock-free ingestion buffer, gateway query guardrails, semantic caching, and an automated AI Query Doctor.
+**FlareHouse mitigates these issues** via an adaptive lock-free ingestion buffer, resilient batch retry loops with DLQ spools, gateway query guardrails, semantic caching, and an automated AI Query Doctor.
 
 ---
 
@@ -130,9 +131,11 @@ flarehouse/
 ## ⚡ Core Capabilities
 
 ### 1. High-Throughput Micro-Batching Daemon (Go)
-* **Adaptive Ring Buffer:** Buffers incoming telemetry events in a thread-safe, lock-free channel queue.
+* **Adaptive Ring Buffer:** Buffers incoming telemetry events in a thread-safe channel queue with explicit backpressure controls.
 * **Vectorized Columnar Ingestion:** Flushes optimal batches (5,000 records or 250ms threshold) via ClickHouse's native TCP protocol (`clickhouse-go/v2`), preventing disk part thrashing.
-* **Channel Backpressure:** Built-in concurrency controls prevent memory runaway when ClickHouse background merges encounter heavy I/O pressure.
+* **Exponential Backoff with Full Jitter:** Transient database connection failures are retried up to `MaxRetries` with randomized exponential backoff delay to prevent retry stampedes.
+* **In-Memory Dead-Letter Spool (DLQ):** Exhausted batches fallback to an in-memory DLQ buffer to prevent unmonitored silent event drops during outages (*Note: In-memory spool is non-durable across process termination; enterprise production setups should drain to local disk WAL or Kafka*).
+* **Non-Lossy Graceful Shutdown:** Channel closes and drains remaining queued events under a bounded shutdown context without abruptly terminating active database write transactions.
 * **Throughput:** Ingests **25,000+ events/second** in local development environments with single-digit millisecond flush latencies.
 
 ### 2. Platform Query Gateway & Guardrails (Go)
@@ -305,6 +308,10 @@ Prometheus metrics are exposed natively at `/metrics`:
 * `flarehouse_ingest_events_received_total`: Total streaming events accepted.
 * `flarehouse_ingest_events_flushed_total`: Total events committed to ClickHouse.
 * `flarehouse_ingest_batches_written_total`: Total columnar batch writes.
+* `flarehouse_ingest_batch_flush_failures_total`: Total batch flush attempts that failed.
+* `flarehouse_ingest_batch_retries_total`: Total transient retry attempts executed.
+* `flarehouse_ingest_events_dropped_total`: Events dropped due to full ring-buffer backpressure.
+* `flarehouse_ingest_dlq_events_total`: Total events diverted to the dead-letter spool.
 * `flarehouse_ingest_batch_flush_duration_seconds`: Histogram of batch write latencies.
 * `flarehouse_ingest_buffer_queue_depth`: Live ring-buffer queue depth.
 * `flarehouse_gateway_query_execution_duration_seconds`: Analytical query duration bucketed by cache hit status.

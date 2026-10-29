@@ -9,42 +9,99 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/uday68/flarehouse/internal/clickhouse"
 	"github.com/uday68/flarehouse/internal/model"
 	"github.com/uday68/flarehouse/internal/telemetry"
 )
 
+// BatchWriter defines the minimal interface for persistent telemetry batch storage
+type BatchWriter interface {
+	InsertBatch(ctx context.Context, events []model.TelemetryEvent) error
+}
+
 type BatcherConfig struct {
-	BatchSize     int
-	FlushInterval time.Duration
-	QueueCapacity int
-	Workers       int
+	BatchSize       int
+	FlushInterval   time.Duration
+	QueueCapacity   int
+	Workers         int
+	MaxRetries      int
+	InitialBackoff  time.Duration
+	MaxBackoff      time.Duration
+	ShutdownTimeout time.Duration
+}
+
+// DeadLetterSpool stores events that permanently failed persistent insertion
+type DeadLetterSpool struct {
+	mu     sync.RWMutex
+	events []model.TelemetryEvent
+	maxCap int
+}
+
+func NewDeadLetterSpool(capacity int) *DeadLetterSpool {
+	if capacity <= 0 {
+		capacity = 50000
+	}
+	return &DeadLetterSpool{
+		events: make([]model.TelemetryEvent, 0, 1024),
+		maxCap: capacity,
+	}
+}
+
+func (s *DeadLetterSpool) Append(events []model.TelemetryEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	available := s.maxCap - len(s.events)
+	if available <= 0 {
+		return
+	}
+	if len(events) > available {
+		s.events = append(s.events, events[:available]...)
+	} else {
+		s.events = append(s.events, events...)
+	}
+}
+
+func (s *DeadLetterSpool) Len() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.events)
+}
+
+func (s *DeadLetterSpool) Drain() []model.TelemetryEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	drained := s.events
+	s.events = make([]model.TelemetryEvent, 0, 1024)
+	return drained
 }
 
 type IngestionEngine struct {
 	cfg        BatcherConfig
-	chClient   *clickhouse.Client
+	writer     BatchWriter
 	eventChan  chan model.TelemetryEvent
+	dlqSpool   *DeadLetterSpool
 	wg         sync.WaitGroup
 	ctx        context.Context
 	cancel     context.CancelFunc
-	mu         sync.RWMutex
+	closed     atomic.Bool
 
 	// Atomic Telemetry Metrics
-	totalReceived atomic.Uint64
-	totalFlushed  atomic.Uint64
-	batchesCount  atomic.Uint64
-	droppedEvents atomic.Uint64
-	totalFlushMs  atomic.Uint64
+	totalReceived  atomic.Uint64
+	totalFlushed   atomic.Uint64
+	batchesCount   atomic.Uint64
+	droppedEvents  atomic.Uint64
+	totalFlushMs   atomic.Uint64
 	lastSecFlushes atomic.Uint64
-	currentEPS    atomic.Uint64
+	currentEPS     atomic.Uint64
+	retryAttempts  atomic.Uint64
+	flushFailures  atomic.Uint64
 
 	// Load testing control
 	isSimulating atomic.Bool
 	stopSim      chan struct{}
 }
 
-func NewIngestionEngine(cfg BatcherConfig, chClient *clickhouse.Client) *IngestionEngine {
+func NewIngestionEngine(cfg BatcherConfig, writer BatchWriter) *IngestionEngine {
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = 5000
 	}
@@ -57,13 +114,26 @@ func NewIngestionEngine(cfg BatcherConfig, chClient *clickhouse.Client) *Ingesti
 	if cfg.Workers <= 0 {
 		cfg.Workers = 2
 	}
+	if cfg.MaxRetries <= 0 {
+		cfg.MaxRetries = 3
+	}
+	if cfg.InitialBackoff <= 0 {
+		cfg.InitialBackoff = 25 * time.Millisecond
+	}
+	if cfg.MaxBackoff <= 0 {
+		cfg.MaxBackoff = 500 * time.Millisecond
+	}
+	if cfg.ShutdownTimeout <= 0 {
+		cfg.ShutdownTimeout = 5 * time.Second
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	engine := &IngestionEngine{
 		cfg:       cfg,
-		chClient:  chClient,
+		writer:    writer,
 		eventChan: make(chan model.TelemetryEvent, cfg.QueueCapacity),
+		dlqSpool:  NewDeadLetterSpool(cfg.QueueCapacity),
 		ctx:       ctx,
 		cancel:    cancel,
 		stopSim:   make(chan struct{}),
@@ -97,21 +167,100 @@ func (e *IngestionEngine) Start() {
 	}()
 }
 
-// Ingest adds an event to the buffer; returns false if channel is full (backpressure)
+// Ingest adds an event to the buffer; returns false if channel is full or engine is closing (backpressure)
 func (e *IngestionEngine) Ingest(event model.TelemetryEvent) bool {
+	if e.closed.Load() {
+		e.droppedEvents.Add(1)
+		telemetry.EventsDroppedTotal.Inc()
+		return false
+	}
+
 	e.totalReceived.Add(1)
 	telemetry.EventsIngestedTotal.Inc()
+
 	select {
 	case e.eventChan <- event:
 		telemetry.BufferDepthGauge.Set(float64(len(e.eventChan)))
 		return true
 	default:
 		e.droppedEvents.Add(1)
+		telemetry.EventsDroppedTotal.Inc()
 		return false
 	}
 }
 
-// workerLoop drains events and flushes batched slices to ClickHouse
+// flushBatchWithRetry attempts bounded retries with exponential backoff and jitter
+func (e *IngestionEngine) flushBatchWithRetry(ctx context.Context, batch []model.TelemetryEvent, workerID int) error {
+	if len(batch) == 0 {
+		return nil
+	}
+
+	flushStart := time.Now()
+	var lastErr error
+
+	for attempt := 0; attempt <= e.cfg.MaxRetries; attempt++ {
+		// Stop retrying if the context is cancelled
+		if ctx.Err() != nil {
+			e.droppedEvents.Add(uint64(len(batch)))
+			telemetry.EventsDroppedTotal.Add(float64(len(batch)))
+			return ctx.Err()
+		}
+
+		if attempt > 0 {
+			e.retryAttempts.Add(1)
+			telemetry.BatchRetryCountTotal.Inc()
+
+			// Exponential backoff with full jitter
+			backoff := e.cfg.InitialBackoff * (1 << (attempt - 1))
+			if backoff > e.cfg.MaxBackoff {
+				backoff = e.cfg.MaxBackoff
+			}
+			jitter := time.Duration(rand.Int63n(int64(backoff) + 1))
+			sleepDur := (backoff / 2) + (jitter / 2)
+
+			select {
+			case <-ctx.Done():
+				e.droppedEvents.Add(uint64(len(batch)))
+				telemetry.EventsDroppedTotal.Add(float64(len(batch)))
+				return ctx.Err()
+			case <-time.After(sleepDur):
+			}
+		}
+
+		if e.writer == nil {
+			lastErr = fmt.Errorf("no batch writer configured")
+			continue
+		}
+
+		err := e.writer.InsertBatch(ctx, batch)
+		if err == nil {
+			duration := time.Since(flushStart).Milliseconds()
+			e.totalFlushed.Add(uint64(len(batch)))
+			e.batchesCount.Add(1)
+			e.totalFlushMs.Add(uint64(duration))
+			e.lastSecFlushes.Add(uint64(len(batch)))
+
+			telemetry.EventsFlushedTotal.Add(float64(len(batch)))
+			telemetry.BatchesWrittenTotal.Inc()
+			telemetry.BatchFlushLatency.Observe(time.Since(flushStart).Seconds())
+			telemetry.BufferDepthGauge.Set(float64(len(e.eventChan)))
+			return nil
+		}
+
+		lastErr = err
+	}
+
+	// Max retries exhausted: route batch to dead-letter spool
+	e.flushFailures.Add(1)
+	e.droppedEvents.Add(uint64(len(batch)))
+	telemetry.BatchFlushFailuresTotal.Inc()
+	telemetry.DLQEventsTotal.Add(float64(len(batch)))
+	e.dlqSpool.Append(batch)
+
+	return fmt.Errorf("worker %d: batch flush failed after %d retries: %w", workerID, e.cfg.MaxRetries, lastErr)
+}
+
+// workerLoop drains events and flushes batched slices
 func (e *IngestionEngine) workerLoop(workerID int) {
 	defer e.wg.Done()
 
@@ -119,50 +268,45 @@ func (e *IngestionEngine) workerLoop(workerID int) {
 	ticker := time.NewTicker(e.cfg.FlushInterval)
 	defer ticker.Stop()
 
-	flush := func() {
+	flush := func(ctx context.Context) {
 		if len(buffer) == 0 {
 			return
 		}
-		flushStart := time.Now()
 		batchCopy := make([]model.TelemetryEvent, len(buffer))
 		copy(batchCopy, buffer)
-		buffer = buffer[:0] // reset slice header
+		buffer = buffer[:0] // reset slice header only after copying
 
-		if err := e.chClient.InsertBatch(e.ctx, batchCopy); err != nil {
-			fmt.Printf("[Worker %d] ClickHouse batch insert failed: %v\n", workerID, err)
-		} else {
-			duration := time.Since(flushStart).Milliseconds()
-			e.totalFlushed.Add(uint64(len(batchCopy)))
-			e.batchesCount.Add(1)
-			e.totalFlushMs.Add(uint64(duration))
-			e.lastSecFlushes.Add(uint64(len(batchCopy)))
-
-			// Prometheus Observability metrics
-			telemetry.EventsFlushedTotal.Add(float64(len(batchCopy)))
-			telemetry.BatchesWrittenTotal.Inc()
-			telemetry.BatchFlushLatency.Observe(time.Since(flushStart).Seconds())
-			telemetry.BufferDepthGauge.Set(float64(len(e.eventChan)))
-		}
+		_ = e.flushBatchWithRetry(ctx, batchCopy, workerID)
 	}
 
 	for {
 		select {
-		case <-e.ctx.Done():
-			flush()
-			return
 		case event, ok := <-e.eventChan:
 			if !ok {
-				flush()
+				// Channel closed, flush remaining buffer using bounded shutdown context
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), e.cfg.ShutdownTimeout)
+				flush(shutdownCtx)
+				cancel()
 				return
 			}
 			buffer = append(buffer, event)
 			if len(buffer) >= e.cfg.BatchSize {
-				flush()
+				flush(e.ctx)
 			}
 		case <-ticker.C:
-			flush()
+			flush(e.ctx)
 		}
 	}
+}
+
+// DeadLetterCount returns the number of events in the dead-letter spool
+func (e *IngestionEngine) DeadLetterCount() int {
+	return e.dlqSpool.Len()
+}
+
+// DrainDeadLetterEvents retrieves and clears dead-letter events for inspection or replay
+func (e *IngestionEngine) DrainDeadLetterEvents() []model.TelemetryEvent {
+	return e.dlqSpool.Drain()
 }
 
 // Stats returns current operational metrics
@@ -225,7 +369,7 @@ func (e *IngestionEngine) StartLoadSimulator(count int) {
 
 			e.Ingest(evt)
 			if i%1000 == 0 {
-				time.Sleep(1 * time.Millisecond) // micro throttle to emulate continuous flow
+				time.Sleep(1 * time.Millisecond)
 			}
 		}
 	}()
@@ -236,9 +380,18 @@ func (e *IngestionEngine) StopLoadSimulator() {
 	e.isSimulating.Store(false)
 }
 
-// Stop shuts down the engine cleanly
+// Stop cleanly drains remaining events, flushes buffers, and halts workers
 func (e *IngestionEngine) Stop() {
-	e.cancel()
+	if !e.closed.CompareAndSwap(false, true) {
+		return
+	}
+
+	// Close channel to signal workers to drain remaining events
 	close(e.eventChan)
+
+	// Wait for workers to flush their remaining buffers with bounded shutdown context
 	e.wg.Wait()
+
+	// Cancel background rate ticker context
+	e.cancel()
 }

@@ -71,4 +71,36 @@ var (
 		Name:      "guardrail_blocked_queries_total",
 		Help:      "Total count of queries blocked by platform safety guardrails",
 	})
+
+	// BatchFlushFailuresTotal tracks batches that failed after exhausting retries
+	BatchFlushFailuresTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "flarehouse",
+		Subsystem: "ingest",
+		Name:      "batch_flush_failures_total",
+		Help:      "Total count of batch flush operations that failed all retries",
+	})
+
+	// BatchRetryCountTotal tracks individual retry attempts during flush failures
+	BatchRetryCountTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "flarehouse",
+		Subsystem: "ingest",
+		Name:      "batch_retry_count_total",
+		Help:      "Total number of retry attempts made for failed ClickHouse flushes",
+	})
+
+	// EventsDroppedTotal tracks events dropped due to buffer saturation or exhausted retries
+	EventsDroppedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "flarehouse",
+		Subsystem: "ingest",
+		Name:      "events_dropped_total",
+		Help:      "Total count of telemetry events dropped permanently",
+	})
+
+	// DLQEventsTotal tracks events diverted to dead-letter quarantine spool
+	DLQEventsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "flarehouse",
+		Subsystem: "ingest",
+		Name:      "dlq_events_total",
+		Help:      "Total count of events saved to dead-letter quarantine after persistent failure",
+	})
 )
